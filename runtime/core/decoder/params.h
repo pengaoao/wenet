@@ -110,6 +110,11 @@ std::shared_ptr<DecodeResource> InitDecodeResourceFromFlags() {
   }
   resource->unit_table = unit_table;
 
+  std::vector<std::string> contexts;
+  contexts.push_back("虚球");
+  resource->context_graph = std::make_shared<ContextGraph>();
+  resource->context_graph->BuildContextGraph(contexts, symbol_table);
+
   return resource;
 }
 
