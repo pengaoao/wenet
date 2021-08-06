@@ -9,5 +9,5 @@ decode_checkpoint=$dir/final.pt
 
 python wenet/bin/export_onnx.py \
     --config $dir/train.yaml \
-    --checkpoint $dir/$decode_checkpoint
+    --checkpoint $decode_checkpoint
 

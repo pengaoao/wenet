@@ -110,7 +110,7 @@ if __name__ == '__main__':
     onnx_path = 'decoder.onnx'
     memory = torch.randn(10, 131, 256)
     memory_mask = torch.ones(10, 1, 131).bool()
-    ys_in_pad = torch.rindint(0, 4232, (10, 50)).long()
+    ys_in_pad = torch.randint(0, 4232, (10, 50)).long()
     ys_in_lens = torch.tensor([13, 13, 13, 13, 13, 13, 13, 13, 50, 13])
     r_ys_in_pad = torch.randint(0, 4232, (10, 50)).long()
 

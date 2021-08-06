@@ -325,7 +325,7 @@ class BaseEncoder(torch.nn.Module):
         outputs = []
         offset = 0
         required_cache_size = decoding_chunk_size * num_decoding_left_chunks
-
+        encoder_session = onnxruntime.InferenceSession("encoder.onnx")
         # Feed forward overlap input step by step
         for cur in range(0, num_frames - context + 1, stride):
             end = min(cur + decoding_window, num_frames)
@@ -339,14 +339,14 @@ class BaseEncoder(torch.nn.Module):
             #                                            elayers_output_cache,
             #                                            conformer_cnn_cache)
             encoder_inputs = {
-                self.encoder_session.get_inputs()[0].name: chunk_xs.numpy(),
-                self.encoder_session.get_inputs()[1].name: np.array(offset),
-                self.encoder_session.get_inputs()[2].name: np.array(required_cache_size),
-                self.encoder_session.get_inputs()[3].name: subsampling_cache.numpy(),
-                self.encoder_session.get_inputs()[4].name: elayers_output_cache.numpy(),
-                self.encoder_session.get_inputs()[5].name: conformer_cnn_cache.numpy(),
+                encoder_session.get_inputs()[0].name: chunk_xs.numpy(),
+                encoder_session.get_inputs()[1].name: np.array(offset),
+                encoder_session.get_inputs()[2].name: np.array(required_cache_size),
+                encoder_session.get_inputs()[3].name: subsampling_cache.numpy(),
+                encoder_session.get_inputs()[4].name: elayers_output_cache.numpy(),
+                encoder_session.get_inputs()[5].name: conformer_cnn_cache.numpy(),
             }
-            ort_outs = self.encoder_session.run(None, encoder_inputs)
+            ort_outs = encoder_session.run(None, encoder_inputs)
             y, subsampling_cache, elayers_output_cache, conformer_cnn_cache = \
                 torch.from_numpy(ort_outs[0]), torch.from_numpy(ort_outs[1]), \
                 torch.from_numpy(ort_outs[2]), torch.from_numpy(ort_outs[3])
@@ -447,7 +447,7 @@ class ConformerEncoder(BaseEncoder):
             cnn_module_kernel (int): Kernel size of convolution module.
             causal (bool): whether to use causal convolution or not.
         """
-        self.encoder_session = onnxruntime.InferenceSession("encoder.onnx")
+
         assert check_argument_types()
         super().__init__(input_size, output_size, attention_heads,
                          linear_units, num_blocks, dropout_rate,
