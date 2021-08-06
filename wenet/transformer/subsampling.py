@@ -16,8 +16,11 @@ class BaseSubsampling(torch.nn.Module):
         self.right_context = 0
         self.subsampling_rate = 1
 
-    def position_encoding(self, offset: int, size: int) -> torch.Tensor:
-        return self.pos_enc.position_encoding(offset, size)
+    def position_encoding(self, 
+                        offset: torch.Tensor, 
+                        size: torch.Tensor,
+                        onnx_mode: bool = False) -> torch.Tensor:
+        return self.pos_enc.position_encoding(offset, size, onnx_mode)
 
 
 class LinearNoSubsampling(BaseSubsampling):
@@ -89,16 +92,17 @@ class Conv2dSubsampling4(BaseSubsampling):
             torch.nn.Linear(odim * (((idim - 1) // 2 - 1) // 2), odim))
         self.pos_enc = pos_enc_class
         # The right context for every conv layer is computed by:
-        # (kernel_size - 1) * frame_rate_of_this_layer
+        # (kernel_size - 1) / 2 * stride  * frame_rate_of_this_layer
         self.subsampling_rate = 4
-        # 6 = (3 - 1) * 1 + (3 - 1) * 2
+        # 6 = (3 - 1) / 2 * 2 * 1 + (3 - 1) / 2 * 2 * 2
         self.right_context = 6
 
     def forward(
             self,
             x: torch.Tensor,
             x_mask: torch.Tensor,
-            offset: int = 0
+            offset: torch.Tensor = torch.tensor(0),
+            onnx_mode: bool = False,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Subsample x.
 
@@ -118,7 +122,7 @@ class Conv2dSubsampling4(BaseSubsampling):
         x = self.conv(x)
         b, c, t, f = x.size()
         x = self.out(x.transpose(1, 2).contiguous().view(b, t, c * f))
-        x, pos_emb = self.pos_enc(x, offset)
+        x, pos_emb = self.pos_enc(x, offset, onnx_mode)
         return x, pos_emb, x_mask[:, :, :-2:2][:, :, :-2:2]
 
 
@@ -143,9 +147,9 @@ class Conv2dSubsampling6(BaseSubsampling):
         self.linear = torch.nn.Linear(odim * (((idim - 1) // 2 - 2) // 3),
                                       odim)
         self.pos_enc = pos_enc_class
-        # 10 = (3 - 1) * 1 + (5 - 1) * 2
+        # 14 = (3 - 1) / 2 * 2 * 1 + (5 - 1) / 2 * 3 * 2
         self.subsampling_rate = 6
-        self.right_context = 10
+        self.right_context = 14
 
     def forward(
             self,
@@ -198,7 +202,7 @@ class Conv2dSubsampling8(BaseSubsampling):
             odim * ((((idim - 1) // 2 - 1) // 2 - 1) // 2), odim)
         self.pos_enc = pos_enc_class
         self.subsampling_rate = 8
-        # 14 = (3 - 1) * 1 + (3 - 1) * 2 + (3 - 1) * 4
+        # 14 = (3 - 1) / 2 * 2 * 1 + (3 - 1) / 2 * 2 * 2 + (3 - 1) / 2 * 2 * 4
         self.right_context = 14
 
     def forward(

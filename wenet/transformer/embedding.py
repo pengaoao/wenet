@@ -9,6 +9,7 @@ import math
 from typing import Tuple
 
 import torch
+from wenet.transformer.slice_helper import slice_helper2
 
 
 class PositionalEncoding(torch.nn.Module):
@@ -45,7 +46,8 @@ class PositionalEncoding(torch.nn.Module):
 
     def forward(self,
                 x: torch.Tensor,
-                offset: int = 0) -> Tuple[torch.Tensor, torch.Tensor]:
+                offset: torch.Tensor = torch.tensor(0),
+                onnx_mode: bool = False) -> Tuple[torch.Tensor, torch.Tensor]:
         """Add positional encoding.
 
         Args:
@@ -56,13 +58,17 @@ class PositionalEncoding(torch.nn.Module):
             torch.Tensor: Encoded tensor. Its shape is (batch, time, ...)
             torch.Tensor: for compatibility to RelPositionalEncoding
         """
-        assert offset + x.size(1) < self.max_len
+        # assert offset + x.size(1) < self.max_len
         self.pe = self.pe.to(x.device)
         pos_emb = self.pe[:, offset:offset + x.size(1)]
         x = x * self.xscale + pos_emb
         return self.dropout(x), self.dropout(pos_emb)
 
-    def position_encoding(self, offset: int, size: int) -> torch.Tensor:
+    def position_encoding(self, 
+                            offset: torch.Tensor, 
+                            size: torch.Tensor,
+                            onnx_mode: bool = False,
+                            ) -> torch.Tensor:
         """ For getting encoding in a streaming fashion
 
         Attention!!!!!
@@ -79,7 +85,12 @@ class PositionalEncoding(torch.nn.Module):
             torch.Tensor: Corresponding encoding
         """
         assert offset + size < self.max_len
-        return self.dropout(self.pe[:, offset:offset + size])
+        if onnx_mode:
+            # pe = self.pe[:, offset:offset + size]
+            return slice_helper2(self.pe, offset, offset + size)
+        else:
+            pe = self.pe[:, offset:offset + size]
+        return self.dropout(pe)
 
 
 class RelPositionalEncoding(PositionalEncoding):
@@ -96,7 +107,8 @@ class RelPositionalEncoding(PositionalEncoding):
 
     def forward(self,
                 x: torch.Tensor,
-                offset: int = 0) -> Tuple[torch.Tensor, torch.Tensor]:
+                offset: torch.Tensor,
+                onnx_mode: bool = False) -> Tuple[torch.Tensor, torch.Tensor]:
         """Compute positional encoding.
         Args:
             x (torch.Tensor): Input tensor (batch, time, `*`).
@@ -104,10 +116,16 @@ class RelPositionalEncoding(PositionalEncoding):
             torch.Tensor: Encoded tensor (batch, time, `*`).
             torch.Tensor: Positional embedding tensor (1, time, `*`).
         """
-        assert offset + x.size(1) < self.max_len
+        # assert offset + x.size(1) < self.max_len
         self.pe = self.pe.to(x.device)
         x = x * self.xscale
-        pos_emb = self.pe[:, offset:offset + x.size(1)]
+        if onnx_mode:
+            # end = offset.item() + x.size(1)
+            # pos_emb = torch.index_select(self.pe, 1, torch.tensor(range(x.size(1))))
+            pos_emb = slice_helper2(self.pe, offset, offset + x.size(1))
+            # pos_emb = slice_helper3(pos_emb, x.size(1))
+        else:
+            pos_emb = self.pe[:, offset:offset + x.size(1)]
         return self.dropout(x), self.dropout(pos_emb)
 
 

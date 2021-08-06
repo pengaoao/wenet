@@ -9,6 +9,7 @@ from typing import Optional, Tuple
 
 import torch
 from torch import nn
+from wenet.transformer.slice_helper import slice_helper
 
 
 class TransformerEncoderLayer(nn.Module):
@@ -53,6 +54,9 @@ class TransformerEncoderLayer(nn.Module):
         # concat_linear may be not used in forward fuction,
         # but will be saved in the *.pt
         self.concat_linear = nn.Linear(size + size, size)
+    
+    def set_onnx_mode(self, onnx_mode=False):
+        self.onnx_mode = onnx_mode
 
     def forward(
         self,
@@ -92,9 +96,14 @@ class TransformerEncoderLayer(nn.Module):
             assert output_cache.size(2) == self.size
             assert output_cache.size(1) < x.size(1)
             chunk = x.size(1) - output_cache.size(1)
-            x_q = x[:, -chunk:, :]
-            residual = residual[:, -chunk:, :]
-            mask = mask[:, -chunk:, :]
+            if self.onnx_mode:
+                x_q = slice_helper(x, chunk)
+                residual = slice_helper(residual, chunk)
+                mask = slice_helper(mask, chunk)
+            else:
+                x_q = x[:, -chunk:, :]
+                residual = residual[:, -chunk:, :]
+                mask = mask[:, -chunk:, :]
 
         if self.concat_after:
             x_concat = torch.cat((x, self.self_attn(x_q, x, x, mask)), dim=-1)
@@ -184,6 +193,7 @@ class ConformerEncoderLayer(nn.Module):
         mask_pad: Optional[torch.Tensor] = None,
         output_cache: Optional[torch.Tensor] = None,
         cnn_cache: Optional[torch.Tensor] = None,
+        onnx_mode: bool = False,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Compute encoded features.
 
@@ -193,7 +203,6 @@ class ConformerEncoderLayer(nn.Module):
             pos_emb (torch.Tensor): positional encoding, must not be None
                 for ConformerEncoderLayer.
             mask_pad (torch.Tensor): batch padding mask used for conv module.
-                (#batch, 1，time)
             output_cache (torch.Tensor): Cache tensor of the output
                 (#batch, time2, size), time2 < time in x.
             cnn_cache (torch.Tensor): Convolution cache in conformer layer
@@ -223,10 +232,21 @@ class ConformerEncoderLayer(nn.Module):
             assert output_cache.size(0) == x.size(0)
             assert output_cache.size(2) == self.size
             assert output_cache.size(1) < x.size(1)
-            chunk = x.size(1) - output_cache.size(1)
-            x_q = x[:, -chunk:, :]
-            residual = residual[:, -chunk:, :]
-            mask = mask[:, -chunk:, :]
+
+            # chunk = x.size(1) - output_cache.size(1)
+            if onnx_mode:
+                chunk = x.size(1) - output_cache.size(1) + 1
+                chunk = torch.tensor(chunk)
+            else:
+                chunk = x.size(1) - output_cache.size(1)
+            if onnx_mode:
+                x_q = slice_helper(x, chunk)
+                residual = slice_helper(residual, chunk)
+                mask = slice_helper(mask, chunk)
+            else:
+                x_q = x[:, -chunk:, :]
+                residual = residual[:, -chunk:, :]
+                mask = mask[:, -chunk:, :]
 
         x_att = self.self_attn(x_q, x, x, mask, pos_emb)
         if self.concat_after:

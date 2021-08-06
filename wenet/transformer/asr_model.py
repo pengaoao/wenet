@@ -245,7 +245,7 @@ class ASRModel(torch.nn.Module):
             top_k_logp, top_k_index = logp.topk(beam_size)  # (B*N, N)
             top_k_logp = mask_finished_scores(top_k_logp, end_flag)
             top_k_index = mask_finished_preds(top_k_index, end_flag, self.eos)
-            # 2.3 Second beam prune: select topk score with history
+            # 2.3 Seconde beam prune: select topk score with history
             scores = scores + top_k_logp  # (B*N, N), broadcast add
             scores = scores.view(batch_size, beam_size * beam_size)  # (B, N*N)
             scores, offset_k_index = scores.topk(k=beam_size)  # (B, N)
@@ -570,8 +570,8 @@ class ASRModel(torch.nn.Module):
     def forward_encoder_chunk(
         self,
         xs: torch.Tensor,
-        offset: int,
-        required_cache_size: int,
+        offset: torch.Tensor,
+        required_cache_size: torch.Tensor,
         subsampling_cache: Optional[torch.Tensor] = None,
         elayers_output_cache: Optional[List[torch.Tensor]] = None,
         conformer_cnn_cache: Optional[List[torch.Tensor]] = None,
@@ -674,6 +674,10 @@ class ASRModel(torch.nn.Module):
         # r_dccoder_out will be 0.0, if reverse_weight is 0.0
         r_decoder_out = torch.nn.functional.log_softmax(r_decoder_out, dim=-1)
         return decoder_out, r_decoder_out
+
+    @torch.jit.export
+    def test(self,) -> str:
+        return "test"
 
 
 def init_asr_model(configs):

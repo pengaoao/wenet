@@ -5,6 +5,15 @@
 
 import torch
 
+def tril_onnx(x, diagonal = 0):
+    m,n = x.shape[0], x.shape[1]
+    arange = torch.arange(n, device = x.device)
+    mask = arange.expand(m, n)
+    mask_maker = torch.arange(m, device = x.device).unsqueeze(-1)
+    if diagonal:
+        mask_maker = mask_maker + diagonal
+    mask = mask <= mask_maker
+    return mask * x
 
 def subsequent_mask(
         size: int,
@@ -35,8 +44,10 @@ def subsequent_mask(
          [1, 1, 0],
          [1, 1, 1]]
     """
-    ret = torch.ones(size, size, device=device, dtype=torch.bool)
-    return torch.tril(ret, out=ret)
+    # to export onnx, we change the code as follows
+    ret = torch.ones(size, size, device=device)
+    #return torch.tril(ret, out=ret)
+    return tril_onnx(ret)
 
 
 def subsequent_chunk_mask(
@@ -162,8 +173,10 @@ def make_pad_mask(lengths: torch.Tensor) -> torch.Tensor:
                  [0, 0, 0, 1, 1],
                  [0, 0, 1, 1, 1]]
     """
-    batch_size = int(lengths.size(0))
-    max_len = int(lengths.max().item())
+    # to export the decoder onnx and avoid the constant fold
+    #batch_size = int(lengths.size(0))
+    batch_size = lengths.shape[0]
+    max_len = lengths.max()
     seq_range = torch.arange(0,
                              max_len,
                              dtype=torch.int64,

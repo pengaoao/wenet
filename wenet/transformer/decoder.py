@@ -116,7 +116,8 @@ class TransformerDecoder(torch.nn.Module):
         m = subsequent_mask(tgt_mask.size(-1),
                             device=tgt_mask.device).unsqueeze(0)
         # tgt_mask: (B, L, L)
-        tgt_mask = tgt_mask & m
+        #tgt_mask = tgt_mask & m
+        tgt_mask = torch.mul(tgt_mask, m)
         x, _ = self.embed(tgt)
         for layer in self.decoders:
             x, tgt_mask, memory, memory_mask = layer(x, tgt_mask, memory,

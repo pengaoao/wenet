@@ -18,6 +18,7 @@ from wenet.transformer.embedding import NoPositionalEncoding
 from wenet.transformer.encoder_layer import TransformerEncoderLayer
 from wenet.transformer.encoder_layer import ConformerEncoderLayer
 from wenet.transformer.positionwise_feed_forward import PositionwiseFeedForward
+from wenet.transformer.slice_helper import slice_helper3, get_next_cache_start
 from wenet.transformer.subsampling import Conv2dSubsampling4
 from wenet.transformer.subsampling import Conv2dSubsampling6
 from wenet.transformer.subsampling import Conv2dSubsampling8
@@ -26,7 +27,8 @@ from wenet.utils.common import get_activation
 from wenet.utils.mask import make_pad_mask
 from wenet.utils.mask import add_optional_chunk_mask
 
-
+import onnxruntime
+import numpy as np
 class BaseEncoder(torch.nn.Module):
     def __init__(
         self,
@@ -116,9 +118,13 @@ class BaseEncoder(torch.nn.Module):
         self.static_chunk_size = static_chunk_size
         self.use_dynamic_chunk = use_dynamic_chunk
         self.use_dynamic_left_chunk = use_dynamic_left_chunk
+        self.onnx_mode = False
 
     def output_size(self) -> int:
         return self._output_size
+
+    def set_onnx_mode(self, onnx_mode=False):
+        self.onnx_mode = onnx_mode
 
     def forward(
         self,
@@ -130,7 +136,7 @@ class BaseEncoder(torch.nn.Module):
         """Embed positions in tensor.
 
         Args:
-            xs: padded input tensor (B, T, D)
+            xs: padded input tensor (B, L, D)
             xs_lens: input length (B)
             decoding_chunk_size: decoding chunk size for dynamic chunk
                 0: default for training, use random dynamic chunk.
@@ -141,16 +147,13 @@ class BaseEncoder(torch.nn.Module):
                 >=0: use num_decoding_left_chunks
                 <0: use all left chunks
         Returns:
-            encoder output tensor xs, and subsampled masks
-            xs: padded output tensor (B, T' ~= T/subsample_rate, D)
-            masks: torch.Tensor batch padding mask after subsample
-                (B, 1, T' ~= T/subsample_rate)
+            encoder output tensor, lens and mask
         """
-        masks = ~make_pad_mask(xs_lens).unsqueeze(1)  # (B, 1, T)
+        masks = ~make_pad_mask(xs_lens).unsqueeze(1)  # (B, 1, L)
         if self.global_cmvn is not None:
             xs = self.global_cmvn(xs)
         xs, pos_emb, masks = self.embed(xs, masks)
-        mask_pad = masks  # (B, 1, T/subsample_rate)
+        mask_pad = masks
         chunk_masks = add_optional_chunk_mask(xs, masks,
                                               self.use_dynamic_chunk,
                                               self.use_dynamic_left_chunk,
@@ -169,13 +172,12 @@ class BaseEncoder(torch.nn.Module):
     def forward_chunk(
         self,
         xs: torch.Tensor,
-        offset: int,
-        required_cache_size: int,
+        offset_tensor: torch.Tensor = torch.tensor(0),
+        required_cache_size_tensor: torch.Tensor = torch.tensor(0),
         subsampling_cache: Optional[torch.Tensor] = None,
-        elayers_output_cache: Optional[List[torch.Tensor]] = None,
-        conformer_cnn_cache: Optional[List[torch.Tensor]] = None,
-    ) -> Tuple[torch.Tensor, torch.Tensor, List[torch.Tensor],
-               List[torch.Tensor]]:
+        elayers_output_cache: Optional[torch.Tensor] = None,
+        conformer_cnn_cache: Optional[torch.Tensor] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """ Forward just one chunk
 
         Args:
@@ -208,30 +210,44 @@ class BaseEncoder(torch.nn.Module):
         tmp_masks = tmp_masks.unsqueeze(1)
         if self.global_cmvn is not None:
             xs = self.global_cmvn(xs)
-        xs, pos_emb, _ = self.embed(xs, tmp_masks, offset)
+        xs, pos_emb, _ = self.embed(xs, tmp_masks, offset_tensor, self.onnx_mode)
         if subsampling_cache is not None:
             cache_size = subsampling_cache.size(1)
             xs = torch.cat((subsampling_cache, xs), dim=1)
         else:
             cache_size = 0
-        pos_emb = self.embed.position_encoding(offset - cache_size, xs.size(1))
-        if required_cache_size < 0:
-            next_cache_start = 0
-        elif required_cache_size == 0:
-            next_cache_start = xs.size(1)
+        if self.onnx_mode:
+            xs = xs[:, 1:, :]
+            cache_size = cache_size - 1
+        pos_emb = self.embed.position_encoding(offset_tensor - cache_size, 
+                                            xs.size(1),
+                                            self.onnx_mode)
+        if self.onnx_mode:
+            next_cache_start = get_next_cache_start(required_cache_size_tensor, xs)
         else:
-            next_cache_start = max(xs.size(1) - required_cache_size, 0)
-        r_subsampling_cache = xs[:, next_cache_start:, :]
+            required_cache_size = required_cache_size_tensor.detach().item()
+            if required_cache_size < 0:
+                next_cache_start = 0
+            elif required_cache_size == 0:
+                next_cache_start = xs.size(1)
+            else:
+                next_cache_start = max(xs.size(1) - required_cache_size, 0)
+        if self.onnx_mode:
+            r_subsampling_cache = slice_helper3(xs, next_cache_start)
+        else:
+            r_subsampling_cache = xs[:, next_cache_start:, :]
         # Real mask for transformer/conformer layers
         masks = torch.ones(1, xs.size(1), device=xs.device, dtype=torch.bool)
         masks = masks.unsqueeze(1)
-        r_elayers_output_cache = []
-        r_conformer_cnn_cache = []
+        r_elayers_output_cache = None
+        r_conformer_cnn_cache = None
         for i, layer in enumerate(self.encoders):
             if elayers_output_cache is None:
                 attn_cache = None
             else:
                 attn_cache = elayers_output_cache[i]
+            if self.onnx_mode:
+                attn_cache = attn_cache[:, 1:, :]
             if conformer_cnn_cache is None:
                 cnn_cache = None
             else:
@@ -240,13 +256,27 @@ class BaseEncoder(torch.nn.Module):
                                          masks,
                                          pos_emb,
                                          output_cache=attn_cache,
-                                         cnn_cache=cnn_cache)
-            r_elayers_output_cache.append(xs[:, next_cache_start:, :])
-            r_conformer_cnn_cache.append(new_cnn_cache)
+                                         cnn_cache=cnn_cache,
+                                         onnx_mode=self.onnx_mode)
+            if self.onnx_mode:
+                layer_output_cache = slice_helper3(xs, next_cache_start)
+            else:
+                layer_output_cache = xs[:, next_cache_start:, :]
+            if i == 0:
+                r_elayers_output_cache = layer_output_cache
+                r_conformer_cnn_cache = new_cnn_cache.unsqueeze(0)
+            else:
+                # r_elayers_output_cache.append(xs[:, next_cache_start:, :])
+                r_elayers_output_cache = torch.cat((r_elayers_output_cache, layer_output_cache), 0)
+                # r_conformer_cnn_cache.append(new_cnn_cache)
+                r_conformer_cnn_cache = torch.cat((r_conformer_cnn_cache, new_cnn_cache.unsqueeze(0)), 0)
         if self.normalize_before:
             xs = self.after_norm(xs)
-
-        return (xs[:, cache_size:, :], r_subsampling_cache,
+        if self.onnx_mode:
+            output = slice_helper3(xs, cache_size)
+        else:
+            output = xs[:, cache_size:, :]
+        return (output, r_subsampling_cache,
                 r_elayers_output_cache, r_conformer_cnn_cache)
 
     def forward_chunk_by_chunk(
@@ -300,12 +330,27 @@ class BaseEncoder(torch.nn.Module):
         for cur in range(0, num_frames - context + 1, stride):
             end = min(cur + decoding_window, num_frames)
             chunk_xs = xs[:, cur:end, :]
-            (y, subsampling_cache, elayers_output_cache,
-             conformer_cnn_cache) = self.forward_chunk(chunk_xs, offset,
-                                                       required_cache_size,
-                                                       subsampling_cache,
-                                                       elayers_output_cache,
-                                                       conformer_cnn_cache)
+            # to verify if the onnx is right, we use the onnx infer here
+
+            # (y, subsampling_cache, elayers_output_cache,
+            #  conformer_cnn_cache) = self.forward_chunk(chunk_xs, offset,
+            #                                            required_cache_size,
+            #                                            subsampling_cache,
+            #                                            elayers_output_cache,
+            #                                            conformer_cnn_cache)
+            encoder_inputs = {
+                self.encoder_session.get_inputs()[0].name: chunk_xs.numpy(),
+                self.encoder_session.get_inputs()[1].name: np.array(offset),
+                self.encoder_session.get_inputs()[2].name: np.array(required_cache_size),
+                self.encoder_session.get_inputs()[3].name: subsampling_cache.numpy(),
+                self.encoder_session.get_inputs()[4].name: elayers_output_cache.numpy(),
+                self.encoder_session.get_inputs()[5].name: conformer_cnn_cache.numpy(),
+            }
+            ort_outs = self.encoder_session.run(None, encoder_inputs)
+            y, subsampling_cache, elayers_output_cache, conformer_cnn_cache = \
+                torch.from_numpy(ort_outs[0]), torch.from_numpy(ort_outs[1]), \
+                torch.from_numpy(ort_outs[2]), torch.from_numpy(ort_outs[3])
+            elayers_output_cache = torch.unsqueeze(elayers_output_cache, 2)
             outputs.append(y)
             offset += y.size(1)
         ys = torch.cat(outputs, 1)
@@ -402,6 +447,7 @@ class ConformerEncoder(BaseEncoder):
             cnn_module_kernel (int): Kernel size of convolution module.
             causal (bool): whether to use causal convolution or not.
         """
+        self.encoder_session = onnxruntime.InferenceSession("encoder.onnx")
         assert check_argument_types()
         super().__init__(input_size, output_size, attention_heads,
                          linear_units, num_blocks, dropout_rate,
